@@ -1,0 +1,46 @@
+Option Explicit
+
+Public Type PivotGroup
+    region                  As String
+    groupTitle              As String
+    custFilter              As String
+    UseDateFilter           As Boolean
+    DateFilterType          As String
+    Date1                   As String
+    Date2                   As String
+    Date3                   As String
+    Date4                   As String
+    MarkupPct               As Double
+    RowSpacing              As Long
+    jeCredit                As String
+    jeDebit1                As String
+    jeDebit2                As String
+    Active                  As Boolean
+    AlwaysAddFactoredField  As Boolean
+    SummaryControlDateBound As Boolean
+End Type
+
+Public Enum PivotMode
+    pmFactored = 1
+    pmAccrued = 2
+    pmSummary = 3
+End Enum
+
+Public Const CFG_REGION         As Integer = 1
+Public Const CFG_TITLE          As Integer = 2
+Public Const CFG_CUSTFILTER     As Integer = 3
+Public Const CFG_USEDATEFILTER  As Integer = 4
+Public Const CFG_DATEFILTTYPE   As Integer = 5
+Public Const CFG_DATE1          As Integer = 6
+Public Const CFG_DATE2          As Integer = 7
+Public Const CFG_DATE3          As Integer = 8
+Public Const CFG_DATE4          As Integer = 9
+Public Const CFG_MARKUPPCT      As Integer = 10
+Public Const CFG_ROWSPACING     As Integer = 11
+Public Const CFG_JECREDIT       As Integer = 12
+Public Const CFG_JEDEBIT1       As Integer = 13
+Public Const CFG_JEDEBIT2       As Integer = 14
+Public Const CFG_ACTIVE         As Integer = 15
+Public Const CFG_ALWAYSADDFACT  As Integer = 16
+Public Const CFG_SUMMCTRLBOUND  As Integer = 17
+
