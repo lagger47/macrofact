@@ -1,0 +1,208 @@
+Option Explicit
+
+'==========================================================
+' Fill Template From Data Files
+'----------------------------------------------------------
+' 1) You pick ONE blank template file.
+' 2) You pick MANY data files (same layout).
+' 3) For each data file the macro:
+'       - copies the VALUES from START_ROW down to the last data row
+'       - pastes them into a FRESH copy of the template (values only)
+'       - fills Column R with the Region name typed in the pop-up
+'       - saves that filled copy under the DATA file's own name,
+'         inside an output sub-folder.
+'
+' Originals (template + data files) are NEVER modified.
+' Keep this macro in a SEPARATE workbook or Personal Macro Workbook,
+' NOT inside the template itself.
+'==========================================================
+
+' ---------------- CONFIG (adjust if needed) ----------------
+Private Const START_ROW As Long = 16            ' first row of data to copy/paste
+Private Const ANCHOR_COL As Long = 1            ' column used to find LAST data row (A = 1)
+Private Const LAST_COL As Long = 0              ' 0 = auto-detect; or set a number e.g. 26 = up to col Z
+Private Const DATA_SHEET As String = "JE"        ' "" = first worksheet; or a name e.g. "Sheet1"
+Private Const TEMPLATE_SHEET As String = "DEMO-FB01"     ' "" = first worksheet; or a name
+Private Const OUTPUT_SUBFOLDER As String = "Filled_Output"
+Private Const PASTE_WITH_NUMBER_FORMATS As Boolean = False  ' True = also bring number formats
+' -----------------------------------------------------------
+
+Sub FillTemplateFromDataFiles()
+    Dim templatePath As String
+    Dim dataFiles As Collection
+    Dim outFolder As String
+    Dim okCount As Long, failCount As Long
+    Dim logMsg As String, result As String
+    Dim i As Long
+    Dim regionName As String
+
+    ' --- NEW: Pop-up to ask for the Region ---
+    regionName = InputBox("Which region are we doing it?", "Region Selection")
+    
+    ' Check if they clicked Cancel or left it blank
+    If Len(Trim(regionName)) = 0 Then
+        MsgBox "Region is required. Macro cancelled.", vbExclamation, "Cancelled"
+        Exit Sub
+    End If
+    ' -----------------------------------------
+
+    templatePath = PickSingleFile("Select the BLANK template file")
+    If Len(templatePath) = 0 Then Exit Sub
+
+    Set dataFiles = PickMultipleFiles("Select all the DATA files to fill")
+    If dataFiles.count = 0 Then Exit Sub
+
+    outFolder = GetFolder(dataFiles(1)) & Application.PathSeparator & OUTPUT_SUBFOLDER
+    If Dir(outFolder, vbDirectory) = "" Then MkDir outFolder
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+
+    For i = 1 To dataFiles.count
+        ' Pass the regionName into the processing function
+        result = ProcessOneFile(templatePath, dataFiles(i), outFolder, regionName)
+        If Len(result) = 0 Then
+            okCount = okCount + 1
+            logMsg = logMsg & "OK  : " & GetFileName(dataFiles(i)) & vbCrLf
+        Else
+            failCount = failCount + 1
+            logMsg = logMsg & "FAIL: " & GetFileName(dataFiles(i)) & "  (" & result & ")" & vbCrLf
+        End If
+    Next i
+
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    MsgBox "Done." & vbCrLf & _
+           "Saved " & okCount & " file(s), " & failCount & " failed." & vbCrLf & vbCrLf & _
+           "Output folder:" & vbCrLf & outFolder & vbCrLf & vbCrLf & _
+           logMsg, vbInformation, "Fill Template"
+End Sub
+
+' Returns "" on success, or an error description on failure.
+' Added regionName as an argument
+Private Function ProcessOneFile(templatePath As String, dataPath As String, _
+                                outFolder As String, regionName As String) As String
+    Dim wbTemplate As Workbook, wbData As Workbook
+    Dim wsTemplate As Worksheet, wsData As Worksheet
+    Dim lastRow As Long, lastCol As Long, hdrCol As Long
+    Dim srcRange As Range
+    Dim outPath As String
+    Dim pasteType As XlPasteType
+
+    On Error GoTo CleanFail
+
+    Set wbData = Workbooks.Open(Filename:=dataPath, ReadOnly:=True)
+    Set wsData = GetSheet(wbData, DATA_SHEET)
+
+    lastRow = wsData.Cells(wsData.Rows.count, ANCHOR_COL).End(xlUp).Row
+    If lastRow < START_ROW Then
+        Err.Raise vbObjectError + 1, , "No data at/after row " & START_ROW
+    End If
+
+    If LAST_COL > 0 Then
+        lastCol = LAST_COL
+    Else
+        lastCol = wsData.Cells(START_ROW, wsData.Columns.count).End(xlToLeft).Column
+        hdrCol = wsData.Cells(START_ROW - 1, wsData.Columns.count).End(xlToLeft).Column
+        If hdrCol > lastCol Then lastCol = hdrCol
+    End If
+
+    Set srcRange = wsData.Range(wsData.Cells(START_ROW, 1), _
+                                wsData.Cells(lastRow, lastCol))
+
+    Set wbTemplate = Workbooks.Open(Filename:=templatePath)
+    Set wsTemplate = GetSheet(wbTemplate, TEMPLATE_SHEET)
+
+    If PASTE_WITH_NUMBER_FORMATS Then
+        pasteType = xlPasteValuesAndNumberFormats
+    Else
+        pasteType = xlPasteValues
+    End If
+
+    ' 1. Paste the copied data
+    srcRange.Copy
+    wsTemplate.Cells(START_ROW, 1).PasteSpecial Paste:=pasteType
+    Application.CutCopyMode = False
+
+    ' 2. NEW: Fill Column R (Column 18) with the Region Name
+    wsTemplate.Range(wsTemplate.Cells(START_ROW, 18), wsTemplate.Cells(lastRow, 18)).Value = regionName
+
+    wbData.Close SaveChanges:=False
+    Set wbData = Nothing
+
+    outPath = outFolder & Application.PathSeparator & GetFileName(dataPath)
+    wbTemplate.SaveAs Filename:=outPath, FileFormat:=FileFormatFor(outPath)
+    wbTemplate.Close SaveChanges:=False
+    Set wbTemplate = Nothing
+
+    ProcessOneFile = ""
+    Exit Function
+
+CleanFail:
+    ProcessOneFile = Err.Description
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If Not wbData Is Nothing Then wbData.Close SaveChanges:=False
+    If Not wbTemplate Is Nothing Then wbTemplate.Close SaveChanges:=False
+End Function
+
+'---------------------- helpers ----------------------
+Private Function GetSheet(wb As Workbook, sheetName As String) As Worksheet
+    If Len(sheetName) = 0 Then
+        Set GetSheet = wb.Worksheets(1)
+    Else
+        Set GetSheet = wb.Worksheets(sheetName)
+    End If
+End Function
+
+Private Function PickSingleFile(prompt As String) As String
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .title = prompt
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel files", "*.xlsx; *.xlsm; *.xls"
+        If .Show = -1 Then PickSingleFile = .SelectedItems(1)
+    End With
+End Function
+
+Private Function PickMultipleFiles(prompt As String) As Collection
+    Dim c As New Collection, j As Long
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .title = prompt
+        .AllowMultiSelect = True
+        .Filters.Clear
+        .Filters.Add "Excel files", "*.xlsx; *.xlsm; *.xls"
+        If .Show = -1 Then
+            For j = 1 To .SelectedItems.count
+                c.Add .SelectedItems(j)
+            Next j
+        End If
+    End With
+    Set PickMultipleFiles = c
+End Function
+
+Private Function GetFolder(path As String) As String
+    GetFolder = Left$(path, InStrRev(path, Application.PathSeparator) - 1)
+End Function
+
+Private Function GetFileName(path As String) As String
+    GetFileName = Mid$(path, InStrRev(path, Application.PathSeparator) + 1)
+End Function
+
+Private Function FileFormatFor(path As String) As Long
+    Dim ext As String
+    ext = LCase$(Mid$(path, InStrRev(path, ".") + 1))
+    Select Case ext
+        Case "xlsm": FileFormatFor = 52
+        Case "xls":  FileFormatFor = 56
+        Case Else:   FileFormatFor = 51
+    End Select
+End Function
+
+
+
+
+
