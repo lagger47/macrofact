@@ -1,0 +1,245 @@
+Option Explicit
+
+Public Sub CreateJEForSheet(ws As Worksheet, groups() As PivotGroup, sheetType As String, _
+    Optional wsTmpl As Worksheet = Nothing, _
+    Optional saveFolder As String = "", _
+    Optional dateStamp As String = "", _
+    Optional userInput As String = "")
+
+    On Error GoTo ErrHandler
+
+    Const JE_START_COL  As Long = 14
+    Const SUMMARY_COL   As Long = 5
+
+    Dim foundTables As Integer: foundTables = 0
+    Dim groupCount  As Integer: groupCount = 0
+    On Error Resume Next: groupCount = UBound(groups): On Error GoTo ErrHandler
+
+    Dim doExport As Boolean
+    doExport = (Not wsTmpl Is Nothing) And (saveFolder <> "")
+
+    ' Factored sheet = "Factored", Accrued sheet = "Accrued" in col 21
+    Dim sheetDesc As String
+    If sheetType = "Factored" Then sheetDesc = "Factored Receivables Reclass" Else sheetDesc = "Accrued Factor Payables"
+
+    Dim i As Long
+    For i = 1 To ws.Cells(ws.Rows.count, "E").End(xlUp).Row
+
+        If InStr(CStr(ws.Cells(i, SUMMARY_COL).Value), "GRAND TOTAL") > 0 Then
+            foundTables = foundTables + 1
+            If foundTables > groupCount Then Exit For
+
+            Dim g As PivotGroup: g = groups(foundTables)
+
+            ' Labels for sheet JE header
+            Dim lbl1 As String, lbl2 As String, lbl3 As String
+            If sheetType = "Factored" Then
+                lbl1 = "Credit to " & g.jeCredit
+                lbl2 = "Debit to " & g.jeDebit1
+                lbl3 = "Debit to " & g.jeDebit2
+            Else
+                lbl1 = "Debit to " & g.jeCredit
+                lbl2 = "Credit to " & g.jeDebit1
+                lbl3 = "Credit to " & g.jeDebit2
+            End If
+
+            ' Find start row of this summary table
+            Dim tableEndRow   As Long: tableEndRow = i
+            Dim tableStartRow As Long: tableStartRow = i
+            Dim j As Long
+            For j = i - 1 To 1 Step -1
+                Dim ba As String: ba = Trim(CStr(ws.Cells(j, SUMMARY_COL).Value))
+                If Left(ba, 1) = "P" Then
+                    tableStartRow = j
+                ElseIf ba = "" Or InStr(ba, "Sum of Amount") > 0 Then
+                    tableStartRow = j + 1: Exit For
+                End If
+            Next j
+
+            ' Write JE header rows to sheet
+            Dim hRow As Long: hRow = tableStartRow - 3
+            ws.Cells(hRow, JE_START_COL).Value = foundTables
+            ws.Cells(hRow, JE_START_COL + 1).Value = 40
+            ws.Cells(hRow, JE_START_COL + 2).Value = 40
+            ws.Cells(hRow, JE_START_COL).Font.Bold = True
+            ws.Cells(hRow, JE_START_COL + 1).Font.Bold = True
+            ws.Cells(hRow, JE_START_COL + 2).Font.Bold = True
+
+            ws.Cells(hRow + 1, JE_START_COL).Value = lbl1
+            ws.Cells(hRow + 1, JE_START_COL + 1).Value = lbl2
+            ws.Cells(hRow + 1, JE_START_COL + 2).Value = lbl3
+            ws.Cells(hRow + 1, JE_START_COL).Font.Bold = True
+            ws.Cells(hRow + 1, JE_START_COL + 1).Font.Bold = True
+            ws.Cells(hRow + 1, JE_START_COL + 2).Font.Bold = True
+
+            ws.Cells(hRow + 2, JE_START_COL).Value = "Sum of Amount in doc. curr."
+            ws.Cells(hRow + 2, JE_START_COL).Font.Bold = True
+            ws.Cells(hRow + 2, JE_START_COL + 1).Value = Format(g.MarkupPct, "0.00%")
+            ws.Cells(hRow + 2, JE_START_COL + 1).Interior.Color = RGB(255, 255, 0)
+
+            ' Set up template workbook for this group
+            Dim wbNew   As Workbook
+            Dim wsNew   As Worksheet
+            Dim tmplRow As Long: tmplRow = 16
+
+            If doExport Then
+                Set wbNew = Workbooks.Add
+                Application.DisplayAlerts = False
+                Dim wsTemp As Worksheet
+                For Each wsTemp In wbNew.Sheets
+                    If wsTemp.Index <> 1 Then wsTemp.Delete
+                Next wsTemp
+                Application.DisplayAlerts = True
+
+                Set wsNew = wbNew.Sheets(1)
+                wsNew.Name = "JE"
+
+                ' Copy full template — content, formatting, column widths
+                wsTmpl.Cells.Copy
+                wsNew.Cells.PasteSpecial xlPasteAllUsingSourceTheme
+                wsNew.Cells.PasteSpecial xlPasteColumnWidths
+                Application.CutCopyMode = False
+            End If
+
+            ' Write data rows to sheet AND template simultaneously
+            Dim jeRow As Long: jeRow = tableStartRow
+
+            For j = tableStartRow To tableEndRow - 1
+                Dim baVal   As String: baVal = CStr(ws.Cells(j, SUMMARY_COL).Value)
+                Dim amtVal  As Double: amtVal = 0
+                Dim mkupVal As Double: mkupVal = 0
+                Dim netVal  As Double: netVal = 0
+                Dim mapCode As String: mapCode = CStr(ws.Cells(j, SUMMARY_COL + 5).Value)
+                Dim jeCode  As String: jeCode = CStr(ws.Cells(j, SUMMARY_COL + 6).Value)
+
+                If IsNumeric(ws.Cells(j, SUMMARY_COL + 1).Value) Then amtVal = CDbl(ws.Cells(j, SUMMARY_COL + 1).Value)
+                If IsNumeric(ws.Cells(j, SUMMARY_COL + 2).Value) Then mkupVal = CDbl(ws.Cells(j, SUMMARY_COL + 2).Value)
+                If IsNumeric(ws.Cells(j, SUMMARY_COL + 3).Value) Then netVal = CDbl(ws.Cells(j, SUMMARY_COL + 3).Value)
+
+                If Left(Trim(baVal), 1) = "P" And amtVal <> 0 Then
+
+                    ' Row 1: full amount — credit account
+                    WriteJELine ws, jeRow, JE_START_COL, baVal, g.jeCredit, amtVal, mapCode, jeCode
+                    If doExport Then
+                        WriteTmplRow wsNew, tmplRow, baVal, g.jeCredit, 40, Round(amtVal, 2), mapCode, jeCode, userInput, sheetDesc
+                        tmplRow = tmplRow + 1
+                    End If
+                    jeRow = jeRow + 1
+
+                    ' Row 2: markup — debit account 1
+                    If mkupVal <> 0 Then
+                        WriteJELine ws, jeRow, JE_START_COL, baVal, g.jeDebit1, mkupVal, mapCode, jeCode
+                        If doExport Then
+                            WriteTmplRow wsNew, tmplRow, baVal, g.jeDebit1, 50, Round(mkupVal, 2), mapCode, jeCode, userInput, sheetDesc
+                            tmplRow = tmplRow + 1
+                        End If
+                        jeRow = jeRow + 1
+                    End If
+
+                    ' Row 3: net — debit account 2
+                    If netVal <> 0 Then
+                        WriteJELine ws, jeRow, JE_START_COL, baVal, g.jeDebit2, netVal, mapCode, jeCode
+                        If doExport Then
+                            WriteTmplRow wsNew, tmplRow, baVal, g.jeDebit2, 50, Round(netVal, 2), mapCode, jeCode, userInput, sheetDesc
+                            tmplRow = tmplRow + 1
+                        End If
+                        jeRow = jeRow + 1
+                    End If
+
+                End If
+            Next j
+
+            ' Buffer rows on sheet
+            Dim k As Integer
+            For k = 1 To 5: ws.Cells(jeRow + k, JE_START_COL).Value = "": Next k
+
+            ' Save and close template workbook for this group
+            If doExport And Not wbNew Is Nothing Then
+                wsNew.Columns.AutoFit
+                Dim safeName As String: safeName = JE_SafeName(g.groupTitle)
+                Dim outPath  As String
+                outPath = saveFolder & "JE_" & sheetType & "_" & safeName & "_" & dateStamp & ".xlsx"
+                Application.DisplayAlerts = False
+                wbNew.SaveAs Filename:=outPath, FileFormat:=xlOpenXMLWorkbook
+                wbNew.Close SaveChanges:=False
+                Application.DisplayAlerts = True
+                Set wbNew = Nothing
+                Set wsNew = Nothing
+            End If
+
+        End If
+    Next i
+
+    ws.Columns.AutoFit
+    Exit Sub
+ErrHandler:
+    On Error Resume Next
+    If Not wbNew Is Nothing Then wbNew.Close SaveChanges:=False
+    MsgBox "Error in CreateJEForSheet [" & ws.Name & "]: " & _
+           Err.Description & " (#" & Err.Number & ")", vbCritical
+End Sub
+
+' ----------------------------------------------------------------
+' WriteJELine — writes to the pivot sheet (unchanged)
+' ----------------------------------------------------------------
+Private Sub WriteJELine(ws As Worksheet, jeRow As Long, startCol As Long, _
+    baValue As String, account As String, amount As Double, _
+    mapCode As String, jeCode As String)
+
+    ws.Cells(jeRow, startCol).Value = baValue
+    ws.Cells(jeRow, startCol + 1).Value = account
+    ws.Cells(jeRow, startCol + 2).Value = amount
+    ws.Cells(jeRow, startCol + 2).NumberFormat = "$#,##0.00"
+    ws.Cells(jeRow, startCol + 3).Value = Round(amount, 2)
+    ws.Cells(jeRow, startCol + 3).NumberFormat = "0.00"
+    ws.Cells(jeRow, startCol + 4).Value = Round(amount, 2)
+    ws.Cells(jeRow, startCol + 4).NumberFormat = "0.00"
+    ws.Cells(jeRow, startCol + 5).Value = mapCode
+    ws.Cells(jeRow, startCol + 6).Value = jeCode
+End Sub
+
+' ----------------------------------------------------------------
+' WriteTmplRow — writes one row to the template workbook
+'
+' Col 1  (A)  : Line          — always "1091"
+' Col 3  (C)  : Business Area — BA code (P201, P202...)
+' Col 4  (D)  : Account       — account number
+' Col 5  (E)  : Posting Key   — 40 or 50
+' Col 8  (H)  : Amount        — dollar amount
+' Col 14 (N)  : Profit Center — mapCode
+' Col 15 (O)  : Segment       — jeCode
+' Col 18 (R)  : Order         — user input e.g. MUFG
+' Col 21 (U)  : Long Text     — "Factored" or "Accrued"
+' ----------------------------------------------------------------
+Private Sub WriteTmplRow(ws As Worksheet, r As Long, _
+    baCode As String, account As String, postingKey As Integer, _
+    amount As Double, mapCode As String, jeCode As String, _
+    userInput As String, sheetDesc As String)
+
+    ws.Cells(r, 1).Value = "1091"
+    ws.Cells(r, 2).Value = baCode
+    ws.Cells(r, 3).Value = account
+    ws.Cells(r, 4).Value = postingKey
+    ws.Cells(r, 7).Value = amount
+    ws.Cells(r, 7).NumberFormat = "0.00"
+    ws.Cells(r, 13).Value = mapCode
+    ws.Cells(r, 14).Value = jeCode
+    ws.Cells(r, 18).Value = userInput
+    ws.Cells(r, 21).Value = sheetDesc
+End Sub
+
+' ----------------------------------------------------------------
+' JE_SafeName — strips characters invalid in Windows file names
+' ----------------------------------------------------------------
+Private Function JE_SafeName(s As String) As String
+    Dim r As String: r = s
+    Dim bad As String: bad = "\/:*?""<>|"
+    Dim i As Integer
+    For i = 1 To Len(bad)
+        r = Join(Split(r, Mid(bad, i, 1)), "_")
+    Next i
+    If Len(r) > 50 Then r = Left(r, 50)
+    JE_SafeName = Trim(r)
+End Function
+
+
