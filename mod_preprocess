@@ -1,0 +1,301 @@
+Option Explicit
+ 
+' ================================================================
+' MOD_PreProcess  —  Step 1: enrich raw SAP file  -> _Processed.xlsx
+' Uses custmapping sheet: Col A = SAP Account,  Col C = Simple Name
+' ================================================================
+ 
+Sub PrepareRawData()
+    On Error GoTo ErrHandler
+ 
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+ 
+    Dim wsMap As Worksheet
+    On Error Resume Next
+    Set wsMap = ThisWorkbook.Sheets("custmapping")
+    On Error GoTo ErrHandler
+ 
+    If wsMap Is Nothing Then
+        Application.DisplayAlerts = True
+        MsgBox "Sheet 'custmapping' not found in this macro file." & vbCrLf & vbCrLf & _
+               "The sheet must have:" & vbCrLf & _
+               "  Col A = SAP Account number" & vbCrLf & _
+               "  Col C = Customer Simple name (e.g. Cummins, FCA, DMAX LTD)", vbCritical
+        GoTo Cleanup
+    End If
+ 
+    Dim region As String
+    region = Trim(InputBox( _
+        "Which region is this raw file for?" & vbCrLf & vbCrLf & _
+        "Type  US  or  NewRegion", "Region", "US"))
+    If region = "" Then GoTo Cleanup
+ 
+    Dim lastDateHeader As String
+    If UCase(region) = "US" Then
+        lastDateHeader = "Repayment Date with Year"
+    Else
+        lastDateHeader = "Repayment Year with Date"
+    End If
+ 
+    Dim rawPath As String
+    rawPath = PickFile("Step 1 of 2  —  Select Raw SAP Data File")
+    If rawPath = "" Then GoTo Cleanup
+ 
+    Dim wbRaw As Workbook
+    Set wbRaw = Workbooks.Open(rawPath, ReadOnly:=True, UpdateLinks:=False)
+    Dim wsRaw As Worksheet: Set wsRaw = wbRaw.Sheets(1)
+ 
+    InsertColumns wsRaw, lastDateHeader
+ 
+    Dim dictCust As Object
+    Set dictCust = BuildCustDict(wsMap)
+ 
+    If dictCust.count = 0 Then
+        wbRaw.Close SaveChanges:=False
+        Application.DisplayAlerts = True
+        MsgBox "custmapping sheet appears to be empty." & vbCrLf & _
+               "Ensure Col A has SAP Account numbers and Col C has Simple names.", vbExclamation
+        GoTo Cleanup
+    End If
+ 
+    Dim refPath As String
+    refPath = PickFile("Step 2 of 2  —  Select Reference File (factored & repayment dates)")
+    If refPath = "" Then
+        wbRaw.Close SaveChanges:=False
+        GoTo Cleanup
+    End If
+ 
+    Dim wbRef As Workbook
+    Set wbRef = Workbooks.Open(refPath, ReadOnly:=True, UpdateLinks:=False)
+    Dim wsRef As Worksheet: Set wsRef = wbRef.Sheets(1)
+ 
+    EnrichData wsRaw, wsRef, dictCust, lastDateHeader
+    FillBlanksFromRefKey wsRaw
+ 
+    Dim outPath As String
+    outPath = Left(rawPath, InStrRev(rawPath, ".") - 1) & "_Processed.xlsx"
+ 
+    wbRaw.SaveAs Filename:=outPath, FileFormat:=xlOpenXMLWorkbook, CreateBackup:=False
+    wbRaw.Close SaveChanges:=False
+    wbRef.Close SaveChanges:=False
+ 
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+ 
+    MsgBox "Pre-processing complete!" & vbCrLf & vbCrLf & _
+           "Saved as:" & vbCrLf & outPath & vbCrLf & vbCrLf & _
+           "Now run  Step 2 — Run Factoring  using this file.", vbInformation
+    Exit Sub
+ 
+ErrHandler:
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+    MsgBox "Error in PrepareRawData: " & vbCrLf & Err.Description & " (#" & Err.Number & ")", vbCritical
+    Exit Sub
+Cleanup:
+    On Error Resume Next
+    If Not wbRef Is Nothing Then wbRef.Close SaveChanges:=False
+    If Not wbRaw Is Nothing Then wbRaw.Close SaveChanges:=False
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+End Sub
+ 
+Private Function BuildCustDict(wsMap As Worksheet) As Object
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+ 
+    Dim lastRow As Long
+    lastRow = wsMap.Cells(wsMap.Rows.count, "A").End(xlUp).Row
+    If lastRow < 2 Then
+        Set BuildCustDict = dict
+        Exit Function
+    End If
+ 
+    Dim mapData As Variant
+    mapData = wsMap.Range("A1:C" & lastRow).Value
+ 
+    Dim i As Long, keyVal As String
+    For i = 2 To UBound(mapData, 1)
+        keyVal = Trim(CStr(mapData(i, 1)))
+        If keyVal <> "" And Not dict.Exists(keyVal) Then
+            dict.Add keyVal, Trim(CStr(mapData(i, 3)))
+        End If
+    Next i
+ 
+    Set BuildCustDict = dict
+End Function
+ 
+Private Sub InsertColumns(ws As Worksheet, lastDateHeader As String)
+    ws.Columns("C").Insert Shift:=xlToRight
+    ws.Cells(1, "C").Value = "CUSTOMER SIMPLE"
+ 
+    ws.Range("S:X").Insert Shift:=xlToRight
+    ws.Range("S1:X1").Value = Array( _
+        "Factored Date", _
+        "Repayment Date", _
+        "FACTORED YEAR", _
+        "Factored Year with Date", _
+        "REPAYMENT YEAR", _
+        lastDateHeader)
+End Sub
+ 
+Private Sub EnrichData(wsRaw As Worksheet, wsRef As Worksheet, _
+                       dictCust As Object, lastDateHeader As String)
+    On Error GoTo ErrHandler
+ 
+    Dim colAcct     As Long: colAcct = FindHeader(wsRaw, "Account")
+    Dim colCustSim  As Long: colCustSim = FindHeader(wsRaw, "CUSTOMER SIMPLE")
+    Dim colDocNum   As Long: colDocNum = FindHeader(wsRaw, "Document Number")
+    Dim colFacStart As Long: colFacStart = FindHeader(wsRaw, "Factored Date")
+ 
+    Dim missing As String: missing = ""
+    If colAcct = 0 Then missing = missing & "  - Account" & vbCrLf
+    If colCustSim = 0 Then missing = missing & "  - CUSTOMER SIMPLE" & vbCrLf
+    If colDocNum = 0 Then missing = missing & "  - Document Number" & vbCrLf
+    If colFacStart = 0 Then missing = missing & "  - Factored Date" & vbCrLf
+    If missing <> "" Then
+        MsgBox "Required headers not found in raw file:" & vbCrLf & missing, vbCritical
+        Exit Sub
+    End If
+ 
+    Dim lastRowRaw As Long: lastRowRaw = wsRaw.Cells(wsRaw.Rows.count, "A").End(xlUp).Row
+    Dim dataRaw As Variant
+    dataRaw = wsRaw.Range("A1:X" & lastRowRaw).Value
+ 
+    Dim i As Long, key As String
+    For i = 2 To UBound(dataRaw, 1)
+        key = Trim(CStr(dataRaw(i, colAcct)))
+        If dictCust.Exists(key) Then
+            dataRaw(i, colCustSim) = dictCust(key)
+        End If
+    Next i
+ 
+    Dim refDocCol As Long: refDocCol = FindHeader(wsRef, "Document Number")
+    If refDocCol = 0 Then
+        MsgBox "Header 'Document Number' not found in reference file.", vbCritical
+        Exit Sub
+    End If
+ 
+    Dim dateHdrs(1 To 6) As String
+    dateHdrs(1) = "Factored Date"
+    dateHdrs(2) = "Repayment Date"
+    dateHdrs(3) = "FACTORED YEAR"
+    dateHdrs(4) = "Factored Year with Date"
+    dateHdrs(5) = "REPAYMENT YEAR"
+    dateHdrs(6) = lastDateHeader
+ 
+    Dim refCols(1 To 6) As Long
+    Dim j As Long
+    For j = 1 To 6
+        refCols(j) = FindHeader(wsRef, dateHdrs(j))
+        If refCols(j) = 0 Then
+            MsgBox "Header '" & dateHdrs(j) & "' not found in reference file.", vbCritical
+            Exit Sub
+        End If
+    Next j
+ 
+    Dim lastRowRef As Long: lastRowRef = wsRef.Cells(wsRef.Rows.count, "A").End(xlUp).Row
+    Dim dataRef As Variant
+    dataRef = wsRef.Range("A1").Resize( _
+        lastRowRef, _
+        wsRef.Cells(1, wsRef.Columns.count).End(xlToLeft).Column).Value
+ 
+    Dim dictRef As Object: Set dictRef = CreateObject("Scripting.Dictionary")
+    Dim tempArr(1 To 6) As Variant
+ 
+    For i = 2 To UBound(dataRef, 1)
+        key = Trim(CStr(dataRef(i, refDocCol)))
+        If key <> "" And Not dictRef.Exists(key) Then
+            For j = 1 To 6: tempArr(j) = dataRef(i, refCols(j)): Next j
+            dictRef.Add key, tempArr
+        End If
+    Next i
+ 
+    Dim vals() As Variant
+    For i = 2 To UBound(dataRaw, 1)
+        key = Trim(CStr(dataRaw(i, colDocNum)))
+        If dictRef.Exists(key) Then
+            vals = dictRef(key)
+            For j = 1 To 6
+                dataRaw(i, colFacStart + j - 1) = vals(j)
+            Next j
+        End If
+    Next i
+ 
+    wsRaw.Range("A1:X" & lastRowRaw).Value = dataRaw
+    Exit Sub
+ErrHandler:
+    MsgBox "Error in EnrichData: " & Err.Description & " (#" & Err.Number & ")", vbCritical
+End Sub
+ 
+Private Sub FillBlanksFromRefKey(ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.count, "R").End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+ 
+    ws.Columns("S:T").NumberFormat = "@"
+ 
+    Dim dataArr As Variant
+    dataArr = ws.Range("R1:X" & lastRow).Value
+ 
+    Dim currentYear As String
+    currentYear = CStr(Year(Date))
+ 
+    Dim i As Long, refVal As String
+    Dim parts() As String, num1 As String, num2 As String
+ 
+    For i = 2 To UBound(dataArr, 1)
+        If Trim(CStr(dataArr(i, 2))) = "" Then
+            refVal = Trim(CStr(dataArr(i, 1)))
+            If InStr(refVal, "-") > 0 Then
+                parts = Split(refVal, "-")
+                num1 = ExtractDigits(Trim(parts(0)))
+                num2 = ExtractDigits(Trim(parts(1)))
+                If num1 <> "" And num2 <> "" Then
+                    dataArr(i, 2) = num1
+                    dataArr(i, 3) = num2
+                    dataArr(i, 4) = currentYear
+                    dataArr(i, 5) = currentYear & "-" & num1
+                    dataArr(i, 6) = currentYear
+                    dataArr(i, 7) = currentYear & "-" & num2
+                End If
+            End If
+        End If
+    Next i
+ 
+    ws.Range("R1:X" & lastRow).Value = dataArr
+End Sub
+ 
+Private Function FindHeader(ws As Worksheet, headerName As String) As Long
+    Dim F As Range
+    Set F = ws.Rows(1).Find(headerName, LookIn:=xlValues, LookAt:=xlWhole)
+    If Not F Is Nothing Then FindHeader = F.Column Else FindHeader = 0
+End Function
+ 
+Private Function PickFile(title As String) As String
+    Dim fd As Object
+    Set fd = Application.FileDialog(3)
+    fd.title = title
+    fd.Filters.Clear
+    fd.Filters.Add "Excel Files", "*.xlsx;*.xls;*.xlsb"
+    If fd.Show = -1 Then PickFile = fd.SelectedItems(1)
+End Function
+ 
+Private Function ExtractDigits(txt As String) As String
+    Dim i As Long, ch As String, res As String
+    For i = 1 To Len(txt)
+        ch = Mid(txt, i, 1)
+        If ch >= "0" And ch <= "9" Then res = res & ch
+    Next i
+    ExtractDigits = res
+End Function
+
