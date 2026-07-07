@@ -1,0 +1,225 @@
+Option Explicit
+
+Sub RunFactoring()
+    On Error GoTo ErrHandler
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Dim wbMacro As Workbook: Set wbMacro = ThisWorkbook
+
+    Dim regionChoice As String
+    regionChoice = Trim(InputBox("Which region?" & vbCrLf & vbCrLf & _
+        "   US" & vbCrLf & "   NewRegion" & vbCrLf & "   ALL", "Select Region", "US"))
+    If regionChoice = "" Then GoTo Cleanup
+
+    Dim rawFilePath As String
+    rawFilePath = Application.GetOpenFilename( _
+        FileFilter:="Excel Files (*.xls;*.xlsx;*.xlsm),*.xls;*.xlsx;*.xlsm", _
+        title:="Select Processed File (_Processed.xlsx)", MultiSelect:=False)
+    If rawFilePath = "False" Then GoTo Cleanup
+
+    Dim ctrlStr As String
+    ctrlStr = Trim(InputBox("Control Date (MM/DD/YYYY):", "Control Date", Format(Date, "mm/dd/yyyy")))
+    Dim ctrlDateVal As Date
+    If ctrlStr = "" Then
+        ctrlDateVal = Date
+    Else
+        On Error Resume Next: ctrlDateVal = CDate(ctrlStr)
+        If Err.Number <> 0 Then ctrlDateVal = Date: Err.Clear
+        On Error GoTo ErrHandler
+    End If
+    Dim ctrlDateFmt As String: ctrlDateFmt = Format(ctrlDateVal, "yyyymmdd")
+
+    Dim wbData As Workbook: Set wbData = Workbooks.Open(rawFilePath)
+    Dim wsRaw As Worksheet: Set wsRaw = wbData.Sheets(1)
+    Dim cCS As String, cCD As String, cRDY As String, cFYD As String
+    Dim cBA As String, cAmt As String, cRY As String
+    FindColumnHeaders wsRaw, cCS, cCD, cRDY, cFYD, cBA, cAmt, cRY
+
+    Dim regions() As String
+    If UCase(regionChoice) = "ALL" Then
+        regions = Split("US,NewRegion", ",")
+    Else
+        ReDim regions(0): regions(0) = regionChoice
+    End If
+    Dim r As Integer
+    For r = 0 To UBound(regions)
+        If Trim(regions(r)) <> "" Then
+            BuildAllSheets wbData, wbMacro, Trim(regions(r)), _
+                ctrlDateVal, ctrlDateFmt, cCS, cCD, cRDY, cFYD, cBA, cAmt, cRY
+        End If
+    Next r
+
+    Application.ScreenUpdating = True: Application.DisplayAlerts = True
+    MsgBox "Done! Region: " & regionChoice & "  Control Date: " & Format(ctrlDateVal, "mm/dd/yyyy"), vbInformation
+    Exit Sub
+ErrHandler:
+    Application.ScreenUpdating = True: Application.DisplayAlerts = True
+    MsgBox "Error: " & Err.Description & " (#" & Err.Number & ")", vbCritical
+    Exit Sub
+Cleanup:
+    Application.ScreenUpdating = True: Application.DisplayAlerts = True
+End Sub
+
+Sub RunJETables()
+    On Error GoTo ErrHandler
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' -- Region ---------------------------------------------------
+    Dim regionChoice As String
+    regionChoice = Trim(InputBox( _
+        "Which region?" & vbCrLf & vbCrLf & _
+        "   US" & vbCrLf & "   NewRegion", "Region", "US"))
+    If regionChoice = "" Then GoTo Cleanup
+
+    ' -- Source file ----------------------------------------------
+    Dim filePath As String
+    filePath = Application.GetOpenFilename( _
+        FileFilter:="Excel Files (*.xls;*.xlsx;*.xlsm),*.xls;*.xlsx;*.xlsm", _
+        title:="Select the output file with summary tables", _
+        MultiSelect:=False)
+    If filePath = "False" Then GoTo Cleanup
+
+    Dim wbData  As Workbook: Set wbData = Workbooks.Open(filePath)
+    Dim wbMacro As Workbook: Set wbMacro = ThisWorkbook
+
+    ' -- Load config groups ----------------------------------------
+    Dim groups() As PivotGroup
+    groups = ReadConfig(wbMacro, regionChoice)
+    Dim groupCount As Integer: groupCount = 0
+    On Error Resume Next: groupCount = UBound(groups): On Error GoTo ErrHandler
+    If groupCount < 1 Then GoTo Cleanup
+
+    ' -- Find template sheet ---------------------------------------
+    Dim wsTmpl As Worksheet
+    On Error Resume Next
+    Set wsTmpl = wbMacro.Sheets("template")
+    On Error GoTo ErrHandler
+
+    If wsTmpl Is Nothing Then
+        Application.DisplayAlerts = True
+        MsgBox "Sheet named 'template' not found in macro workbook." & vbCrLf & _
+               "JE tables will be written to sheets only — no template workbooks created.", vbExclamation
+        Application.DisplayAlerts = False
+    End If
+
+    ' -- Ask for Order value (col 18) -----------------------------
+    Dim userInput As String: userInput = ""
+    If Not wsTmpl Is Nothing Then
+        userInput = Trim(InputBox( _
+            "Enter value for Column 18 (Order field):" & vbCrLf & _
+            "e.g. MUFG  — this will appear on every row in the template", _
+            "Order", ""))
+    End If
+
+    ' -- Ask for save folder ---------------------------------------
+    Dim saveFolder As String: saveFolder = ""
+    Dim dateStamp  As String: dateStamp = ""
+
+    If Not wsTmpl Is Nothing Then
+        Dim fd As Object
+        Set fd = Application.FileDialog(4)
+        fd.title = "Choose folder to save JE template workbooks"
+        If fd.Show = -1 Then
+            saveFolder = fd.SelectedItems(1)
+            If Right(saveFolder, 1) <> "\" Then saveFolder = saveFolder & "\"
+            dateStamp = Format(Date, "yyyymmdd")
+        Else
+            ' User cancelled folder — still run JE on sheets, skip export
+            Set wsTmpl = Nothing
+        End If
+    End If
+
+    ' -- Get Factored and Accrued sheets ---------------------------
+    Dim wsF As Worksheet, wsA As Worksheet
+    On Error Resume Next
+    Set wsF = wbData.Sheets("Factored_Reclass_All")
+    Set wsA = wbData.Sheets("Accrued_Factor_Pay_Info")
+    On Error GoTo ErrHandler
+
+    ' -- Run for both sheets ---------------------------------------
+    If Not wsF Is Nothing Then
+        CreateJEForSheet wsF, groups, "Factored", wsTmpl, saveFolder, dateStamp, userInput
+    End If
+    If Not wsA Is Nothing Then
+        CreateJEForSheet wsA, groups, "Accrued", wsTmpl, saveFolder, dateStamp, userInput
+    End If
+
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+
+    Dim doneMsg As String
+    doneMsg = "JE tables created in " & wbData.Name
+    If saveFolder <> "" Then
+        doneMsg = doneMsg & vbCrLf & vbCrLf & _
+                  "Template workbooks saved to:" & vbCrLf & saveFolder
+    End If
+    MsgBox doneMsg, vbInformation
+    Exit Sub
+
+ErrHandler:
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    MsgBox "Error in RunJETables: " & Err.Description & " (#" & Err.Number & ")", vbCritical
+    Exit Sub
+Cleanup:
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+End Sub
+
+Sub DebugConfig()
+    Dim regionChoice As String
+    regionChoice = Trim(InputBox("Region to check?", "Debug", "US"))
+    If regionChoice = "" Then Exit Sub
+    Dim wsCfg As Worksheet
+    On Error Resume Next: Set wsCfg = ThisWorkbook.Sheets("pivot_config"): On Error GoTo 0
+    If wsCfg Is Nothing Then MsgBox "pivot_config NOT FOUND.", vbCritical: Exit Sub
+    Dim lr As Long: lr = wsCfg.Cells(wsCfg.Rows.count, "A").End(xlUp).Row
+    Dim raw As String: raw = "Raw pivot_config:" & vbCrLf
+    Dim i As Long
+    For i = 2 To Application.Min(lr, 12)
+        raw = raw & "Row " & i & ": [" & wsCfg.Cells(i, 1).Value & "] Active=[" & wsCfg.Cells(i, 15).Value & "]" & vbCrLf
+    Next i
+    MsgBox raw, vbInformation
+    Dim groups() As PivotGroup: groups = ReadConfig(ThisWorkbook, regionChoice)
+    Dim gc As Integer: gc = 0
+    On Error Resume Next: gc = UBound(groups): On Error GoTo 0
+    If gc < 1 Then MsgBox "0 groups for '" & regionChoice & "'", vbExclamation: Exit Sub
+    Dim msg As String: msg = gc & " group(s) for [" & regionChoice & "]:" & vbCrLf & vbCrLf
+    For i = 1 To gc
+        msg = msg & i & ". " & groups(i).groupTitle & vbCrLf & _
+              "   Cust: " & groups(i).custFilter & vbCrLf & _
+              "   Date: " & groups(i).DateFilterType & " D1=" & groups(i).Date1 & vbCrLf & _
+              "   Markup: " & Format(groups(i).MarkupPct, "0.00%") & vbCrLf & _
+              "   AddFact: " & groups(i).AlwaysAddFactoredField & _
+              "  SumBound: " & groups(i).SummaryControlDateBound & vbCrLf & vbCrLf
+    Next i
+    MsgBox msg, vbInformation
+End Sub
+
+Public Sub FindColumnHeaders(ws As Worksheet, _
+    ByRef cCS As String, ByRef cCD As String, ByRef cRDY As String, _
+    ByRef cFYD As String, ByRef cBA As String, ByRef cAmt As String, ByRef cRY As String)
+    Dim lc As Long: lc = ws.Cells(1, ws.Columns.count).End(xlToLeft).Column
+    Dim i As Long, v As String
+    For i = 1 To lc
+        v = Trim(CStr(ws.Cells(1, i).Value))
+        If InStr(1, v, "CUSTOMER SIMPLE", vbTextCompare) > 0 Then cCS = v
+        If InStr(1, v, "Clearing date", vbTextCompare) > 0 Then cCD = v
+        If InStr(1, v, "Repayment Date with Year", vbTextCompare) > 0 Then cRDY = v
+        If InStr(1, v, "Repayment Year with Date", vbTextCompare) > 0 Then cRDY = v
+        If InStr(1, v, "Factored Year with Date", vbTextCompare) > 0 Then cFYD = v
+        If InStr(1, v, "Business Area", vbTextCompare) > 0 Then cBA = v
+        If InStr(1, v, "Amount in doc. curr.", vbTextCompare) > 0 Then cAmt = v
+        If InStr(1, v, "REPAYMENT YEAR", vbTextCompare) > 0 Then cRY = v
+    Next i
+End Sub
+
+Sub OpenConfig()
+    On Error Resume Next: ThisWorkbook.Sheets("pivot_config").Activate
+    If Err.Number <> 0 Then MsgBox "pivot_config not found.", vbExclamation
+End Sub
+
+
+
+
