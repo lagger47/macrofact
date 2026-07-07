@@ -1,0 +1,746 @@
+Option Explicit
+
+' ----------------------------------------------------------------
+' ReadConfig
+' ----------------------------------------------------------------
+Public Function ReadConfig(wbMacro As Workbook, region As String) As PivotGroup()
+    Dim wsCfg As Worksheet
+    On Error Resume Next
+    Set wsCfg = wbMacro.Sheets("pivot_config")
+    On Error GoTo 0
+    If wsCfg Is Nothing Then
+        MsgBox "Sheet 'pivot_config' not found.", vbCritical
+        Exit Function
+    End If
+
+    Dim lastRow As Long
+    lastRow = wsCfg.Cells(wsCfg.Rows.count, "A").End(xlUp).Row
+    Dim i As Long, regionVal As String, activeVal As String
+    Dim count As Integer: count = 0
+
+    For i = 2 To lastRow
+        regionVal = Trim(CStr(wsCfg.Cells(i, CFG_REGION).Value))
+        activeVal = UCase(Trim(CStr(wsCfg.Cells(i, CFG_ACTIVE).Value)))
+        If UCase(regionVal) = UCase(Trim(region)) And activeVal = "TRUE" Then
+            count = count + 1
+        End If
+    Next i
+
+    If count = 0 Then
+        MsgBox "No active rows for region: '" & region & "'" & vbCrLf & _
+               "Check Col A and Col O in pivot_config.", vbExclamation
+        Exit Function
+    End If
+
+    Dim groups() As PivotGroup
+    ReDim groups(1 To count)
+    Dim idx As Integer: idx = 0
+
+    For i = 2 To lastRow
+        regionVal = Trim(CStr(wsCfg.Cells(i, CFG_REGION).Value))
+        activeVal = UCase(Trim(CStr(wsCfg.Cells(i, CFG_ACTIVE).Value)))
+        If UCase(regionVal) = UCase(Trim(region)) And activeVal = "TRUE" Then
+            idx = idx + 1
+            With groups(idx)
+                .region = regionVal
+                .groupTitle = Trim(CStr(wsCfg.Cells(i, CFG_TITLE).Value))
+                .custFilter = Trim(CStr(wsCfg.Cells(i, CFG_CUSTFILTER).Value))
+                .UseDateFilter = (UCase(Trim(CStr(wsCfg.Cells(i, CFG_USEDATEFILTER).Value))) = "TRUE")
+                .DateFilterType = UCase(Trim(CStr(wsCfg.Cells(i, CFG_DATEFILTTYPE).Value)))
+                .Date1 = Trim(CStr(wsCfg.Cells(i, CFG_DATE1).Value))
+                .Date2 = Trim(CStr(wsCfg.Cells(i, CFG_DATE2).Value))
+                .Date3 = Trim(CStr(wsCfg.Cells(i, CFG_DATE3).Value))
+                .Date4 = Trim(CStr(wsCfg.Cells(i, CFG_DATE4).Value))
+                .MarkupPct = Val(CStr(wsCfg.Cells(i, CFG_MARKUPPCT).Value))
+                Dim rs As String: rs = Trim(CStr(wsCfg.Cells(i, CFG_ROWSPACING).Value))
+                .RowSpacing = IIf(rs = "" Or Val(rs) = 0, 40, CLng(Val(rs)))
+                .jeCredit = Trim(CStr(wsCfg.Cells(i, CFG_JECREDIT).Value))
+                .jeDebit1 = Trim(CStr(wsCfg.Cells(i, CFG_JEDEBIT1).Value))
+                .jeDebit2 = Trim(CStr(wsCfg.Cells(i, CFG_JEDEBIT2).Value))
+                .Active = True
+                .AlwaysAddFactoredField = (UCase(Trim(CStr(wsCfg.Cells(i, CFG_ALWAYSADDFACT).Value))) = "TRUE")
+                .SummaryControlDateBound = (UCase(Trim(CStr(wsCfg.Cells(i, CFG_SUMMCTRLBOUND).Value))) = "TRUE")
+            End With
+        End If
+    Next i
+
+    ReadConfig = groups
+End Function
+
+' ----------------------------------------------------------------
+' CreateSheet
+' ----------------------------------------------------------------
+Public Function CreateSheet(wb As Workbook, sheetName As String) As Worksheet
+    Dim ws As Worksheet
+    Application.DisplayAlerts = False
+    On Error Resume Next
+    Set ws = wb.Sheets(sheetName)
+    If Not ws Is Nothing Then ws.Delete
+    Set ws = Nothing
+    On Error GoTo 0
+    Application.DisplayAlerts = True
+    Set ws = wb.Sheets.Add(after:=wb.Sheets(wb.Sheets.count))
+    ws.Name = sheetName
+    Set CreateSheet = ws
+End Function
+
+' ----------------------------------------------------------------
+' BuildAllSheets
+' ----------------------------------------------------------------
+Public Sub BuildAllSheets(wbData As Workbook, wbMacro As Workbook, _
+    region As String, _
+    controlDateValue As Date, controlDateFormatted As String, _
+    colCustomerSimple As String, colClearingDate As String, _
+    colRepaymentDateYear As String, colFactoredYearDate As String, _
+    colBusinessArea As String, colAmount As String, colRepaymentYear As String)
+
+    Dim groups() As PivotGroup
+    groups = ReadConfig(wbMacro, region)
+    Dim groupCount As Integer: groupCount = 0
+    On Error Resume Next: groupCount = UBound(groups): On Error GoTo 0
+    If groupCount < 1 Then Exit Sub
+
+    Dim wsMapping As Worksheet
+    On Error Resume Next: Set wsMapping = wbMacro.Sheets("mapping"): On Error GoTo 0
+    If wsMapping Is Nothing Then
+        MsgBox "'mapping' sheet not found.", vbCritical: Exit Sub
+    End If
+
+    Dim missing As String: missing = ""
+    If colCustomerSimple = "" Then missing = missing & "  - CUSTOMER SIMPLE" & vbCrLf
+    If colBusinessArea = "" Then missing = missing & "  - Business Area" & vbCrLf
+    If colAmount = "" Then missing = missing & "  - Amount in doc. curr." & vbCrLf
+    If colRepaymentDateYear = "" Then missing = missing & "  - Repayment Date/Year with Date" & vbCrLf
+    If missing <> "" Then
+        MsgBox "Columns NOT found:" & vbCrLf & missing & vbCrLf & _
+               "Did you select the _Processed.xlsx file?", vbCritical: Exit Sub
+    End If
+
+    Dim wsRaw As Worksheet: Set wsRaw = wbData.Sheets(1)
+    Dim srcRange As Range: Set srcRange = wsRaw.Range("A1").CurrentRegion
+    Dim uid As String: uid = Format(Now, "yyyymmddhhnnss")
+
+    Dim wsF As Worksheet: Set wsF = CreateSheet(wbData, "Factored_Reclass_All")
+    Dim wsA As Worksheet: Set wsA = CreateSheet(wbData, "Accrued_Factor_Pay_Info")
+    Dim wsS As Worksheet: Set wsS = CreateSheet(wbData, "Summary_of_Repayment")
+
+    Dim i As Integer
+    Dim oF As Long, oA As Long, oS As Long
+    oF = 0: oA = 0: oS = 0
+
+    For i = 1 To groupCount
+        Dim g As PivotGroup: g = groups(i)
+
+        MakeFactoredPivot wsF, srcRange, oF, i, g, controlDateFormatted, controlDateValue, uid, _
+            colCustomerSimple, colClearingDate, colRepaymentDateYear, colFactoredYearDate, _
+            colBusinessArea, colAmount, colRepaymentYear
+
+        MakeAccruedPivot wsA, srcRange, oA, i, g, controlDateFormatted, controlDateValue, uid, _
+            colCustomerSimple, colClearingDate, colRepaymentDateYear, colFactoredYearDate, _
+            colBusinessArea, colAmount, colRepaymentYear
+
+        Dim lastS As Long
+        lastS = MakeSummaryPivot(wsS, srcRange, oS, i, g, controlDateFormatted, uid, _
+            colCustomerSimple, colClearingDate, colRepaymentDateYear, colFactoredYearDate, colAmount)
+
+        oF = oF + g.RowSpacing
+        oA = oA + g.RowSpacing
+        If lastS > 0 Then oS = lastS + 7
+    Next i
+
+    CreateSummaryTableForSheet wsF, wsMapping, groups
+    CreateSummaryTableForSheet wsA, wsMapping, groups
+    wsF.Columns.AutoFit: wsA.Columns.AutoFit: wsS.Columns.AutoFit
+End Sub
+
+' ================================================================
+' FACTORED PIVOT — Clearing=blank, Repayment<=controlDate
+' ================================================================
+Private Sub MakeFactoredPivot(ws As Worksheet, src As Range, rowOff As Long, _
+    idx As Integer, g As PivotGroup, ctrlFmt As String, ctrlVal As Date, _
+    uid As String, cCust As String, cClr As String, cRepay As String, _
+    cFact As String, cBA As String, cAmt As String, cRepYr As String)
+
+    On Error GoTo ErrH
+    Dim pt As PivotTable, pf As PivotField, pi As PivotItem
+    Dim pc As PivotCache, pos As Integer: pos = 1
+
+    Set pc = ws.Parent.PivotCaches.Create(xlDatabase, src.Address(External:=True))
+    Set pt = pc.CreatePivotTable(ws.Cells(rowOff + 3, 1), "FactP" & idx & "_" & uid)
+
+    With ws.Cells(rowOff + 1, 1)
+        .Value = "SUMMARY OF INVOICES PAID BACK (" & g.groupTitle & ")"
+        .Font.Bold = True: .Font.Size = 12: .Interior.Color = RGB(200, 200, 200)
+    End With
+
+    With pt
+        ' 1 — Repayment Year (page, no filter)
+        If cRepYr <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cRepYr)
+            If Not pf Is Nothing Then pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 2 — Factored Year with Date
+        If cFact <> "" And (g.UseDateFilter Or g.AlwaysAddFactoredField) Then
+            On Error Resume Next
+            Set pf = .PivotFields(cFact)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                If g.UseDateFilter Then
+                    ApplyFactoredDateFilter pf, g.DateFilterType, g.Date1, g.Date2, g.Date3
+                End If
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 3 — Repayment Date Year (page, <= controlDate)
+        If cRepay <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cRepay)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                FilterRepay_NotFuture pf, ctrlFmt
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 4 — Clearing Date (page, blank only)
+        If cClr <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cClr)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                pf.CurrentPage = "(blank)"
+                If Err.Number <> 0 Then
+                    Err.Clear
+                    pf.EnableMultiplePageItems = True
+                    For Each pi In pf.PivotItems
+                        If pi.Name <> "(blank)" And pi.Name <> "" Then
+                            pi.Visible = False
+                        Else
+                            pi.Visible = True
+                        End If
+                    Next pi
+                End If
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 5 — Customer Simple (page, filtered)
+        If cCust <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cCust)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                FilterCustomer pf, g.custFilter
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 6 — Business Area (row)
+        On Error Resume Next
+        Set pf = .PivotFields(cBA)
+        If Not pf Is Nothing Then pf.Orientation = xlRowField: pf.Position = 1
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+
+        ' 7 — Amount (values)
+        On Error Resume Next
+        Set pf = .PivotFields(cAmt)
+        If Not pf Is Nothing Then
+            pf.Orientation = xlDataField: pf.Function = xlSum
+            pf.NumberFormat = "#,##0.00": pf.Name = "Sum of Amount"
+        End If
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+    End With
+    Exit Sub
+ErrH: MsgBox "Factored [" & g.groupTitle & "]: " & Err.Description, vbCritical
+End Sub
+
+' ================================================================
+' ACCRUED PIVOT — Clearing<=controlDate, Repayment>controlDate
+' ================================================================
+Private Sub MakeAccruedPivot(ws As Worksheet, src As Range, rowOff As Long, _
+    idx As Integer, g As PivotGroup, ctrlFmt As String, ctrlVal As Date, _
+    uid As String, cCust As String, cClr As String, cRepay As String, _
+    cFact As String, cBA As String, cAmt As String, cRepYr As String)
+
+    On Error GoTo ErrH
+    Dim pt As PivotTable, pf As PivotField, pi As PivotItem
+    Dim pc As PivotCache, pos As Integer: pos = 1
+
+    Set pc = ws.Parent.PivotCaches.Create(xlDatabase, src.Address(External:=True))
+    Set pt = pc.CreatePivotTable(ws.Cells(rowOff + 3, 1), "AccP" & idx & "_" & uid)
+
+    With ws.Cells(rowOff + 1, 1)
+        .Value = "Invoices paid by customer but not yet due (" & g.groupTitle & ")"
+        .Font.Bold = True: .Font.Size = 12: .Interior.Color = RGB(150, 200, 250)
+    End With
+
+    With pt
+        ' 1 — Repayment Year
+        If cRepYr <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cRepYr)
+            If Not pf Is Nothing Then pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 2 — Factored Year with Date
+        If cFact <> "" And (g.UseDateFilter Or g.AlwaysAddFactoredField) Then
+            On Error Resume Next
+            Set pf = .PivotFields(cFact)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                If g.UseDateFilter Then
+                    ApplyFactoredDateFilter pf, g.DateFilterType, g.Date1, g.Date2, g.Date3
+                End If
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 3 — Repayment Date Year (> controlDate)
+        If cRepay <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cRepay)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                FilterRepay_Future pf, ctrlFmt
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 4 — Clearing Date (<=controlDate, hide blank)
+        If cClr <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cClr)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                FilterClearing_Accrued pf, ctrlFmt, ctrlVal
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 5 — Customer Simple
+        If cCust <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cCust)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField: pf.Position = pos: pos = pos + 1
+                FilterCustomer pf, g.custFilter
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 6 — Business Area (row)
+        On Error Resume Next
+        Set pf = .PivotFields(cBA)
+        If Not pf Is Nothing Then pf.Orientation = xlRowField: pf.Position = 1
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+
+        ' 7 — Amount (values)
+        On Error Resume Next
+        Set pf = .PivotFields(cAmt)
+        If Not pf Is Nothing Then
+            pf.Orientation = xlDataField: pf.Function = xlSum
+            pf.NumberFormat = "#,##0.00": pf.Name = "Sum of Amount"
+        End If
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+    End With
+    Exit Sub
+ErrH: MsgBox "Accrued [" & g.groupTitle & "]: " & Err.Description, vbCritical
+End Sub
+
+' ================================================================
+' SUMMARY PIVOT — Repayment=rows, Clearing=columns
+' ================================================================
+Private Function MakeSummaryPivot(ws As Worksheet, src As Range, rowOff As Long, _
+    idx As Integer, g As PivotGroup, ctrlFmt As String, uid As String, _
+    cCust As String, cClr As String, cRepay As String, _
+    cFact As String, cAmt As String) As Long
+
+    On Error GoTo ErrH
+    Dim pt As PivotTable, pf As PivotField, pi As PivotItem
+    Dim pc As PivotCache
+
+    Set pc = ws.Parent.PivotCaches.Create(xlDatabase, src.Address(External:=True))
+    Set pt = pc.CreatePivotTable(ws.Cells(rowOff + 3, 1), "SumP" & idx & "_" & uid)
+
+    With ws.Cells(rowOff + 1, 1)
+        .Value = "SUMMARY OF REPAYMENT BY CUSTOMER (" & g.groupTitle & ")"
+        .Font.Bold = True: .Font.Size = 12: .Interior.Color = RGB(200, 230, 200)
+    End With
+
+    With pt
+        ' 1 — Customer Simple (page)
+        On Error Resume Next
+        Set pf = .PivotFields(cCust)
+        If Not pf Is Nothing Then
+            pf.Orientation = xlPageField: pf.Position = 1
+            FilterCustomer pf, g.custFilter
+        End If
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+
+        ' 2 — Factored Year with Date (page, only when UseDateFilter=TRUE)
+        If g.UseDateFilter And cFact <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cFact)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlPageField
+                If g.SummaryControlDateBound Then
+                    ' US Cummins: apply controlDate upper bound THEN date filter
+                    ApplyFactoredDateFilter_Summary pf, g.DateFilterType, g.Date1, g.Date2, g.Date3, ctrlFmt
+                Else
+                    ' NewRegion: same filter as Factored/Accrued, no controlDate cap
+                    ApplyFactoredDateFilter pf, g.DateFilterType, g.Date1, g.Date2, g.Date3
+                End If
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 3 — Repayment Date Year (ROW field)
+        On Error Resume Next
+        Set pf = .PivotFields(cRepay)
+        If Not pf Is Nothing Then pf.Orientation = xlRowField
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+
+        ' 4 — Clearing Date (COLUMN field, hide blank)
+        If cClr <> "" Then
+            On Error Resume Next
+            Set pf = .PivotFields(cClr)
+            If Not pf Is Nothing Then
+                pf.Orientation = xlColumnField
+                For Each pi In pf.PivotItems
+                    If pi.Name = "(blank)" Or pi.Name = "" Then
+                        pi.Visible = False
+                    End If
+                Next pi
+            End If
+            Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+        End If
+
+        ' 5 — Amount (values)
+        On Error Resume Next
+        Set pf = .PivotFields(cAmt)
+        If Not pf Is Nothing Then
+            pf.Orientation = xlDataField: pf.Function = xlSum
+            pf.NumberFormat = "#,##0.00": pf.Name = "Sum of Amount"
+        End If
+        Set pf = Nothing: Err.Clear: On Error GoTo ErrH
+    End With
+
+    MakeSummaryPivot = pt.TableRange2.Rows.count + rowOff + 2
+    Exit Function
+ErrH:
+    MsgBox "Summary [" & g.groupTitle & "]: " & Err.Description, vbCritical
+    MakeSummaryPivot = rowOff + 40
+End Function
+
+' ================================================================
+' FILTER: Customer
+' EXCLUDE:X|Y         = exact match exclude
+' EXCLUDECONTAINS:X   = InStr exclude (for DMAX)
+' ONLY:X              = single select
+' CONTAINS:X          = InStr include
+' ALL or blank        = no filter
+' ================================================================
+Public Sub FilterCustomer(pf As PivotField, custFilter As String)
+    On Error Resume Next
+    Dim pi As PivotItem
+    Dim F As String: F = UCase(Trim(custFilter))
+
+    If F = "ALL" Or F = "" Then Exit Sub
+
+    If Left(F, 16) = "EXCLUDECONTAINS:" Then
+        Dim excC As String: excC = UCase(Trim(Mid(custFilter, 17)))
+        pf.EnableMultiplePageItems = True
+        For Each pi In pf.PivotItems
+            If InStr(UCase(pi.Name), excC) > 0 Or pi.Name = "" Then
+                pi.Visible = False
+            Else
+                pi.Visible = True
+            End If
+        Next pi
+
+    ElseIf Left(F, 8) = "EXCLUDE:" Then
+        Dim excList() As String: excList = Split(Mid(custFilter, 9), "|")
+        pf.EnableMultiplePageItems = True
+        For Each pi In pf.PivotItems
+            Dim isExc As Boolean: isExc = False
+            If Trim(pi.Name) = "" Then isExc = True
+            Dim E As Integer
+            For E = 0 To UBound(excList)
+                If UCase(Trim(pi.Name)) = UCase(Trim(excList(E))) Then isExc = True
+            Next E
+            If isExc Then pi.Visible = False Else pi.Visible = True
+        Next pi
+
+    ElseIf Left(F, 5) = "ONLY:" Then
+        Dim onlyV As String: onlyV = Trim(Mid(custFilter, 6))
+        pf.CurrentPage = onlyV
+        If Err.Number <> 0 Then
+            Err.Clear
+            pf.EnableMultiplePageItems = True
+            For Each pi In pf.PivotItems
+                If UCase(Trim(pi.Name)) = UCase(onlyV) Then pi.Visible = True Else pi.Visible = False
+            Next pi
+        End If
+
+    ElseIf Left(F, 9) = "CONTAINS:" Then
+        Dim cVal As String: cVal = UCase(Trim(Mid(custFilter, 10)))
+        pf.EnableMultiplePageItems = True
+        For Each pi In pf.PivotItems
+            If InStr(UCase(pi.Name), cVal) > 0 Then pi.Visible = True Else pi.Visible = False
+        Next pi
+    End If
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' FILTER: Factored Year Date (Factored + Accrued sheets)
+' ================================================================
+Public Sub ApplyFactoredDateFilter(pf As PivotField, fType As String, _
+    d1 As String, d2 As String, d3 As String)
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    Dim pi As PivotItem, dc As String
+    For Each pi In pf.PivotItems
+        dc = ToDC(pi.Name)
+        If dc = "" Then
+            pi.Visible = False
+        Else
+            Select Case fType
+                Case "TILL":        If dc <= d1 Then pi.Visible = True Else pi.Visible = False
+                Case "AFTER", "AFTER_SPLIT": If dc > d1 Then pi.Visible = True Else pi.Visible = False
+                Case "BEFORE":      If dc < d1 Then pi.Visible = True Else pi.Visible = False
+                Case "BETWEEN":     If dc >= d1 And dc <= d2 Then pi.Visible = True Else pi.Visible = False
+                Case "AFTER_COMPLEX"
+                    If (dc > d1 And dc <= d2) Or (dc > d3) Then pi.Visible = True Else pi.Visible = False
+                Case Else:          pi.Visible = True
+            End Select
+        End If
+    Next pi
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' FILTER: Factored Year Date — SUMMARY version (US Cummins only)
+' Same as above but ALSO hides items > controlDate
+' ================================================================
+Public Sub ApplyFactoredDateFilter_Summary(pf As PivotField, fType As String, _
+    d1 As String, d2 As String, d3 As String, ctrlFmt As String)
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    Dim pi As PivotItem, dc As String
+    For Each pi In pf.PivotItems
+        dc = ToDC(pi.Name)
+        If dc = "" Then
+            pi.Visible = False
+        ElseIf dc > ctrlFmt Then
+            pi.Visible = False
+        Else
+            Select Case fType
+                Case "TILL":        If dc <= d1 Then pi.Visible = True Else pi.Visible = False
+                Case "AFTER", "AFTER_SPLIT": If dc > d1 Then pi.Visible = True Else pi.Visible = False
+                Case "BEFORE":      If dc < d1 Then pi.Visible = True Else pi.Visible = False
+                Case "BETWEEN":     If dc >= d1 And dc <= d2 Then pi.Visible = True Else pi.Visible = False
+                Case "AFTER_COMPLEX"
+                    If (dc > d1 And dc <= d2) Or (dc > d3) Then pi.Visible = True Else pi.Visible = False
+                Case Else:          pi.Visible = True
+            End Select
+        End If
+    Next pi
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' FILTER: Repayment Date — NOT future (Factored sheet)
+' Show <= controlDate. Non-date items STAY VISIBLE.
+' ================================================================
+Public Sub FilterRepay_NotFuture(pf As PivotField, ctrlFmt As String)
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    Dim pi As PivotItem, dc As String
+    For Each pi In pf.PivotItems
+        dc = ToDC(pi.Name)
+        If dc = "" Then
+            pi.Visible = True
+        ElseIf dc > ctrlFmt Then
+            pi.Visible = False
+        Else
+            pi.Visible = True
+        End If
+    Next pi
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' FILTER: Repayment Date — future only (Accrued sheet)
+' Show > controlDate. Non-date items HIDDEN.
+' ================================================================
+Public Sub FilterRepay_Future(pf As PivotField, ctrlFmt As String)
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    Dim pi As PivotItem, dc As String
+    For Each pi In pf.PivotItems
+        dc = ToDC(pi.Name)
+        If dc = "" Then
+            pi.Visible = False
+        ElseIf dc > ctrlFmt Then
+            pi.Visible = True
+        Else
+            pi.Visible = False
+        End If
+    Next pi
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' FILTER: Clearing Date — Accrued (hide blank, show <= controlDate)
+' ================================================================
+Public Sub FilterClearing_Accrued(pf As PivotField, ctrlFmt As String, ctrlVal As Date)
+    On Error Resume Next
+    pf.EnableMultiplePageItems = True
+    Dim pi As PivotItem, dc As String
+    For Each pi In pf.PivotItems
+        If pi.Name = "(blank)" Or pi.Name = "" Then
+            pi.Visible = False
+        Else
+            dc = ToDC(pi.Name)
+            If dc <> "" Then
+                If dc > ctrlFmt Then pi.Visible = False Else pi.Visible = True
+            ElseIf IsDate(pi.Name) Then
+                If CDate(pi.Name) > ctrlVal Then pi.Visible = False Else pi.Visible = True
+            Else
+                pi.Visible = True
+            End If
+        End If
+    Next pi
+    On Error GoTo 0
+End Sub
+
+' ================================================================
+' ToDC — convert "YYYY-MM-DD" to "YYYYMMDD" for string comparison
+' ================================================================
+Public Function ToDC(s As String) As String
+    Dim v As String: v = Trim(CStr(s))
+    If Len(v) >= 9 And InStr(v, "-") > 0 Then
+        ToDC = Left(v, 4) & Mid(v, 6, 2) & Right(v, 2)
+    ElseIf Len(v) = 8 And IsNumeric(v) Then
+        ToDC = v
+    Else
+        ToDC = ""
+    End If
+End Function
+
+' ================================================================
+' Summary Table (markup + mapping beside pivots)
+' ================================================================
+Public Sub CreateSummaryTableForSheet(ws As Worksheet, wsMapping As Worksheet, groups() As PivotGroup)
+    On Error GoTo ErrH
+    Dim gc As Integer: gc = 0
+    On Error Resume Next: gc = UBound(groups): On Error GoTo ErrH
+    If gc < 1 Then Exit Sub
+
+    Dim pivCnt As Integer: pivCnt = 0
+    Dim pt As PivotTable
+    For Each pt In ws.PivotTables: pivCnt = pivCnt + 1: Next pt
+    If pivCnt = 0 Then Exit Sub
+
+    Dim pArr() As PivotTable, pRows() As Long
+    ReDim pArr(1 To pivCnt): ReDim pRows(1 To pivCnt)
+    Dim x As Integer: x = 0
+    For Each pt In ws.PivotTables
+        x = x + 1: Set pArr(x) = pt: pRows(x) = pt.TableRange1.Row
+    Next pt
+    Dim i As Integer, j As Integer
+    For i = 1 To pivCnt - 1
+        For j = i + 1 To pivCnt
+            If pRows(i) > pRows(j) Then
+                Dim tr As Long: tr = pRows(i): pRows(i) = pRows(j): pRows(j) = tr
+                Dim tp As PivotTable: Set tp = pArr(i): Set pArr(i) = pArr(j): Set pArr(j) = tp
+            End If
+        Next j
+    Next i
+
+    Dim nf As Integer: nf = 0
+    For i = 1 To pivCnt
+        If i > gc Then Exit For
+        Dim g As PivotGroup: g = groups(i)
+        Set pt = pArr(i)
+        Dim sRow As Long: sRow = pt.TableRange1.Row
+        Dim lRow As Long: lRow = pt.TableRange2.Row + pt.TableRange2.Rows.count - 1
+        Dim sCol As Long: sCol = pt.TableRange2.Column + pt.TableRange2.Columns.count + 2
+        Dim gA As Double, gM As Double, gN As Double
+        gA = 0: gM = 0: gN = 0
+        Dim sr As Long: sr = sRow - 1
+        Dim dr As Long, col As Long
+        For dr = sRow + 1 To lRow - 1
+            Dim bv As String: bv = Trim(CStr(ws.Cells(dr, pt.TableRange2.Column).Value))
+            Dim av As Double: av = 0
+            For col = pt.TableRange2.Column + 1 To pt.TableRange2.Column + pt.TableRange2.Columns.count - 1
+                If IsNumeric(ws.Cells(dr, col).Value) And CStr(ws.Cells(dr, col).Value) <> "" Then
+                    av = CDbl(ws.Cells(dr, col).Value): Exit For
+                End If
+            Next col
+            If Left(bv, 1) = "P" And av <> 0 Then
+                sr = sr + 1
+                Dim mk As Double: mk = av * g.MarkupPct
+                Dim nt As Double: nt = av - mk
+                ws.Cells(sr, sCol).Value = bv
+                ws.Cells(sr, sCol + 1).Value = av: ws.Cells(sr, sCol + 1).NumberFormat = "#,##0.00"
+                ws.Cells(sr, sCol + 2).Value = mk: ws.Cells(sr, sCol + 2).NumberFormat = "#,##0.00"
+                ws.Cells(sr, sCol + 3).Value = nt: ws.Cells(sr, sCol + 3).NumberFormat = "#,##0.00"
+                Dim mc As String: mc = GetMappingCode(wsMapping, bv)
+                Dim jc As String: jc = GetJECode(wsMapping, bv)
+                ws.Cells(sr, sCol + 4).Value = bv
+                If mc = "" Then
+                    nf = nf + 1
+                    ws.Cells(sr, sCol + 5).Value = "NOT FOUND"
+                    ws.Cells(sr, sCol + 5).Interior.Color = RGB(255, 200, 200)
+                    ws.Cells(sr, sCol + 6).Value = "NOT FOUND"
+                    ws.Cells(sr, sCol + 6).Interior.Color = RGB(255, 200, 200)
+                Else
+                    ws.Cells(sr, sCol + 5).Value = mc: ws.Cells(sr, sCol + 6).Value = jc
+                End If
+                gA = gA + av: gM = gM + mk: gN = gN + nt
+            End If
+        Next dr
+        If sr >= sRow Then
+            sr = sr + 1
+            ws.Cells(sr, sCol).Value = "GRAND TOTAL"
+            ws.Cells(sr, sCol).Font.Bold = True: ws.Cells(sr, sCol).Interior.Color = RGB(200, 230, 200)
+            ws.Cells(sr, sCol + 1).Value = gA: ws.Cells(sr, sCol + 2).Value = gM: ws.Cells(sr, sCol + 3).Value = gN
+            Dim c As Integer
+            For c = 1 To 3
+                ws.Cells(sr, sCol + c).Font.Bold = True
+                ws.Cells(sr, sCol + c).Interior.Color = RGB(200, 230, 200)
+                ws.Cells(sr, sCol + c).NumberFormat = "#,##0.00"
+            Next c
+            ws.Range(ws.Cells(sRow, sCol), ws.Cells(sr, sCol + 6)).BorderAround Weight:=xlMedium
+        End If
+    Next i
+    If nf > 0 Then MsgBox nf & " BA code(s) not found in mapping.", vbExclamation
+    Exit Sub
+ErrH: MsgBox "SummaryTable [" & ws.Name & "]: " & Err.Description, vbCritical
+End Sub
+
+Public Function GetMappingCode(wsM As Worksheet, ba As String) As String
+    Dim lr As Long: lr = wsM.Cells(wsM.Rows.count, "A").End(xlUp).Row
+    Dim i As Long
+    For i = 2 To lr
+        If Trim(CStr(wsM.Cells(i, 1).Value)) = ba Then GetMappingCode = Trim(CStr(wsM.Cells(i, 5).Value)): Exit Function
+    Next i
+    GetMappingCode = ""
+End Function
+
+Public Function GetJECode(wsM As Worksheet, ba As String) As String
+    Dim lr As Long: lr = wsM.Cells(wsM.Rows.count, "A").End(xlUp).Row
+    Dim i As Long
+    For i = 2 To lr
+        If Trim(CStr(wsM.Cells(i, 1).Value)) = ba Then GetJECode = Trim(CStr(wsM.Cells(i, 3).Value)): Exit Function
+    Next i
+    GetJECode = ""
+End Function
+
